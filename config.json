@@ -1,0 +1,37 @@
+{
+  "project_name": "Финансовый помощник Wallet Guard",
+  "monthly_budget": 65000,
+  "reminder_days_before": 2,
+  "bills": [
+    {
+      "name": "Аренда квартиры",
+      "date": 5,
+      "amount": 35000,
+      "description": "Оплата до 5 числа"
+    },
+    {
+      "name": "Интернет Ростелеком",
+      "date": 10,
+      "amount": 750,
+      "description": "Тариф Игровой"
+    },
+    {
+      "name": "Мобильная связь",
+      "date": 15,
+      "amount": 600,
+      "description": "Билайн"
+    },
+    {
+      "name": "Подписка Яндекс.Плюс",
+      "date": 22,
+      "amount": 399,
+      "description": "Автопродление"
+    },
+    {
+      "name": "Кредит",
+      "date": 20,
+      "amount": 8500,
+      "description": "Потребительский"
+    }
+  ]
+}
