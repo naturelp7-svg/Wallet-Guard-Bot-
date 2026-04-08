@@ -1,0 +1,100 @@
+name: 📆 Финансовый помощник - Отправка напоминаний
+
+on:
+  schedule:
+    # Запуск каждый день в 10:00 UTC (это 13:00 по Москве)
+    # Минуты (0) Часы (10) ДеньМесяца (*) Месяц (*) ДеньНедели (*)
+    - cron: '0 10 * * *'
+  workflow_dispatch:  # Ручной запуск для теста из интерфейса GitHub
+
+jobs:
+  send_reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Загрузка кода репозитория
+        uses: actions/checkout@v4
+
+      - name: 🛠 Установка зависимостей (jq для JSON)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: 📊 Анализ дат и генерация сообщения
+        id: finance
+        run: |
+          # Получаем текущий день месяца
+          CURRENT_DAY=$(date +%-d)
+          echo "Сегодня число: $CURRENT_DAY"
+
+          # Читаем бюджет
+          BUDGET=$(jq -r '.monthly_budget' config.json)
+          DAYS_BEFORE=$(jq -r '.reminder_days_before' config.json)
+          
+          # Заголовок сообщения
+          MESSAGE="💰 *ФИНАНСОВЫЙ ПОМОЩНИК*%0A"
+          MESSAGE+="━━━━━━━━━━━━━━━━━━%0A%0A"
+          
+          # Счетчик активных напоминаний
+          COUNT=0
+          
+          # Парсим JSON и проверяем даты
+          for row in $(jq -c '.bills[]' config.json); do
+            NAME=$(echo $row | jq -r '.name')
+            BILL_DAY=$(echo $row | jq -r '.date')
+            AMOUNT=$(echo $row | jq -r '.amount')
+            DESC=$(echo $row | jq -r '.description')
+            
+            # Логика расчета: сколько дней осталось до платежа
+            if [ $BILL_DAY -ge $CURRENT_DAY ]; then
+              DAYS_LEFT=$((BILL_DAY - CURRENT_DAY))
+            else
+              # Если дата в следующем месяце
+              DAYS_IN_MONTH=30
+              DAYS_LEFT=$((DAYS_IN_MONTH - CURRENT_DAY + BILL_DAY))
+            fi
+            
+            # Если осталось меньше или равно указанному лимиту дней - показываем
+            if [ $DAYS_LEFT -le $DAYS_BEFORE ] && [ $DAYS_LEFT -ge 0 ]; then
+              COUNT=$((COUNT + 1))
+              # Форматируем строку с суммой
+              MESSAGE+="📌 *$NAME*%0A"
+              MESSAGE+="   └ 💵 ${AMOUNT} ₽%0A"
+              
+              if [ $DAYS_LEFT -eq 0 ]; then
+                MESSAGE+="   └ ⚡ *СЕГОДНЯ!*%0A%0A"
+              elif [ $DAYS_LEFT -eq 1 ]; then
+                MESSAGE+="   └ ⏳ *Завтра*%0A%0A"
+              else
+                MESSAGE+="   └ 🗓 Через ${DAYS_LEFT} дня (до ${BILL_DAY} числа)%0A%0A"
+              fi
+            fi
+          done
+          
+          # Если напоминаний нет, сообщаем об этом
+          if [ $COUNT -eq 0 ]; then
+            MESSAGE+="✅ *Отличные новости!*%0A"
+            MESSAGE+="В ближайшие ${DAYS_BEFORE} дня срочных платежей нет.%0A%0A"
+          fi
+          
+          # Добавляем информацию о бюджете
+          MESSAGE+="━━━━━━━━━━━━━━━━━━%0A"
+          MESSAGE+="📊 *Бюджет на месяц:* ${BUDGET} ₽%0A"
+          MESSAGE+="🔔 Следующая проверка: завтра в 13:00 МСК"
+          
+          # Сохраняем сообщение для следующего шага (заменяем символы для корректной передачи)
+          echo "text=$MESSAGE" >> $GITHUB_OUTPUT
+
+      - name: ✈️ Отправка уведомления в Telegram
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="${{ steps.finance.outputs.text }}" \
+            -d parse_mode="Markdown"
+
+      - name: 📝 Запись в лог-файл истории
+        run: |
+          echo "$(date '+%Y-%m-%d %H:%M:%S') | Напоминание отправлено. Активных платежей: $(echo '${{ steps.finance.outputs.text }}' | grep -o '📌' | wc -l)" >> history.log
+          
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add history.log
+          git commit -m "📝 Обновление лога финансового помощника [$(date)]" || echo "Нет изменений для коммита"
+          git push || echo "Нечего пушить"
