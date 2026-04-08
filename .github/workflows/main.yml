@@ -3,9 +3,8 @@ name: 📆 Финансовый помощник - Отправка напоми
 on:
   schedule:
     # Запуск каждый день в 10:00 UTC (это 13:00 по Москве)
-    # Минуты (0) Часы (10) ДеньМесяца (*) Месяц (*) ДеньНедели (*)
     - cron: '0 10 * * *'
-  workflow_dispatch:  # Ручной запуск для теста из интерфейса GitHub
+  workflow_dispatch:  # Ручной запуск для теста
 
 jobs:
   send_reminder:
@@ -15,18 +14,32 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 🛠 Установка зависимостей (jq для JSON)
-        run: sudo apt-get update && sudo apt-get install -y jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       - name: 📊 Анализ дат и генерация сообщения
         id: finance
         run: |
+          #!/bin/bash
+          set -e  # Останавливаем скрипт при любой ошибке
+          
           # Получаем текущий день месяца
           CURRENT_DAY=$(date +%-d)
           echo "Сегодня число: $CURRENT_DAY"
 
+          # Проверяем, что файл config.json существует
+          if [ ! -f config.json ]; then
+            echo "❌ ОШИБКА: Файл config.json не найден!"
+            exit 1
+          fi
+
           # Читаем бюджет
-          BUDGET=$(jq -r '.monthly_budget' config.json)
-          DAYS_BEFORE=$(jq -r '.reminder_days_before' config.json)
+          BUDGET=$(jq -r '.monthly_budget // "0"' config.json)
+          DAYS_BEFORE=$(jq -r '.reminder_days_before // "2"' config.json)
+          
+          echo "Бюджет: $BUDGET"
+          echo "Напоминать за дней: $DAYS_BEFORE"
           
           # Заголовок сообщения
           MESSAGE="💰 *ФИНАНСОВЫЙ ПОМОЩНИК*%0A"
@@ -35,27 +48,42 @@ jobs:
           # Счетчик активных напоминаний
           COUNT=0
           
+          # Получаем количество счетов в массиве
+          BILLS_COUNT=$(jq '.bills | length' config.json)
+          echo "Найдено счетов: $BILLS_COUNT"
+          
           # Парсим JSON и проверяем даты
-          for row in $(jq -c '.bills[]' config.json); do
-            NAME=$(echo $row | jq -r '.name')
-            BILL_DAY=$(echo $row | jq -r '.date')
-            AMOUNT=$(echo $row | jq -r '.amount')
-            DESC=$(echo $row | jq -r '.description')
+          for i in $(seq 0 $((BILLS_COUNT - 1))); do
+            NAME=$(jq -r ".bills[$i].name" config.json)
+            BILL_DAY=$(jq -r ".bills[$i].date" config.json)
+            AMOUNT=$(jq -r ".bills[$i].amount" config.json)
+            
+            echo "Проверяем: $NAME (день: $BILL_DAY, сумма: $AMOUNT)"
+            
+            # Проверяем, что BILL_DAY - число
+            if ! [[ "$BILL_DAY" =~ ^[0-9]+$ ]]; then
+              echo "⚠️ Пропускаем $NAME - некорректная дата: $BILL_DAY"
+              continue
+            fi
             
             # Логика расчета: сколько дней осталось до платежа
             if [ $BILL_DAY -ge $CURRENT_DAY ]; then
               DAYS_LEFT=$((BILL_DAY - CURRENT_DAY))
             else
-              # Если дата в следующем месяце
+              # Если дата в следующем месяце (упрощенно считаем 30 дней)
               DAYS_IN_MONTH=30
               DAYS_LEFT=$((DAYS_IN_MONTH - CURRENT_DAY + BILL_DAY))
             fi
             
+            echo "  Осталось дней: $DAYS_LEFT"
+            
             # Если осталось меньше или равно указанному лимиту дней - показываем
             if [ $DAYS_LEFT -le $DAYS_BEFORE ] && [ $DAYS_LEFT -ge 0 ]; then
               COUNT=$((COUNT + 1))
+              echo "  ✅ Добавляем в напоминание"
+              
               # Форматируем строку с суммой
-              MESSAGE+="📌 *$NAME*%0A"
+              MESSAGE+="📌 *${NAME}*%0A"
               MESSAGE+="   └ 💵 ${AMOUNT} ₽%0A"
               
               if [ $DAYS_LEFT -eq 0 ]; then
@@ -79,22 +107,45 @@ jobs:
           MESSAGE+="📊 *Бюджет на месяц:* ${BUDGET} ₽%0A"
           MESSAGE+="🔔 Следующая проверка: завтра в 13:00 МСК"
           
-          # Сохраняем сообщение для следующего шага (заменяем символы для корректной передачи)
-          echo "text=$MESSAGE" >> $GITHUB_OUTPUT
+          # Сохраняем сообщение для следующего шага
+          # Экранируем специальные символы для GitHub Actions
+          echo "text<<EOF" >> $GITHUB_OUTPUT
+          echo "$MESSAGE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "📝 Сгенерировано сообщение длиной: ${#MESSAGE} символов"
+          echo "📊 Всего активных напоминаний: $COUNT"
 
       - name: ✈️ Отправка уведомления в Telegram
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+          MESSAGE_TEXT="${{ steps.finance.outputs.text }}"
+          
+          # Отправляем запрос
+          RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d text="${{ steps.finance.outputs.text }}" \
-            -d parse_mode="Markdown"
+            -d text="$MESSAGE_TEXT" \
+            -d parse_mode="Markdown")
+          
+          # Проверяем ответ
+          echo "Ответ от Telegram: $RESPONSE"
+          
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "✅ Сообщение успешно отправлено!"
+          else
+            echo "❌ Ошибка при отправке сообщения"
+            exit 1
+          fi
 
       - name: 📝 Запись в лог-файл истории
         run: |
-          echo "$(date '+%Y-%m-%d %H:%M:%S') | Напоминание отправлено. Активных платежей: $(echo '${{ steps.finance.outputs.text }}' | grep -o '📌' | wc -l)" >> history.log
+          # Создаем запись в лог
+          echo "$(date '+%Y-%m-%d %H:%M:%S') | Проверка выполнена. Активных напоминаний: $COUNT" >> history.log
           
+          # Коммитим изменения
           git config user.email "github-actions@github.com"
           git config user.name "GitHub Actions"
           git add history.log
-          git commit -m "📝 Обновление лога финансового помощника [$(date)]" || echo "Нет изменений для коммита"
+          git commit -m "📝 Обновление лога финансового помощника [$(date '+%Y-%m-%d')]" || echo "Нет изменений для коммита"
           git push || echo "Нечего пушить"
+        env:
+          COUNT: ${{ steps.finance.outputs.count }}
